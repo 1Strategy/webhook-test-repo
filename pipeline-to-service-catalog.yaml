@@ -222,7 +222,7 @@ Resources:
               OutputArtifacts:
                 - Name: SCCheckoutArtifact
               Configuration:
-                Owner: jing-1strategy
+                Owner: jing-1strategy-test
                 Repo: !Ref GithubRepositoryName
                 Branch: master
                 OAuthToken: !Ref GithubPersonalToken
