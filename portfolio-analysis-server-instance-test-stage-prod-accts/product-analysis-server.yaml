@@ -1,0 +1,181 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Template to create EC2 instance for Review Portal with CloudWatch agent installed."
+Parameters:
+  SSMKey:
+    Description: Name of parameter store which contains the json configuration of CWAgent.
+    Type: String
+    Default: AmazonCloudWatch-Analysis-Server-CW-Config
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Type: "AWS::SSM::Parameter::Value<AWS::EC2::KeyPair::KeyName>"
+    Default: EC2KeyPairName
+  InstanceType:
+    Description: EC2 instance type
+    Type: String
+    Default: t3.small
+    ConstraintDescription: must be a valid EC2 instance type.
+  InstanceAMI:
+    Description: Managed AMI ID for EC2 Instance
+    Type: "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>"
+    Default: "/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2"
+  AnalysisServerVolumeType:
+    Description: The type of the volume.
+    Type: String
+    Default: gp2
+    AllowedValues: [gp2, io1]
+    ConstraintDescription: This can be gp2 for General Purpose SSD, io1 for Provisioned IOPS SSD, st1 for Throughput Optimized HDD, sc1 for Cold HDD, or standard for Magnetic volumes.
+  AnalysisServerSecondVolumeSize:
+    Description: The size of the volume, in GiBs.
+    Type: String
+    Default: 100
+    ConstraintDescription: 1-16,384 for gp2, 4-16,384 for io1, 500-16,384 for st1, 500-16,384 for sc1, and 1-1,024 for standard.
+  AnalysisServerRootVolumeSize:
+    Description: The size of the root volume, in GiBs.
+    Type: String
+    Default: 100
+    ConstraintDescription: 1-16,384 for gp2, 4-16,384 for io1, 500-16,384 for st1, 500-16,384 for sc1, and 1-1,024 for standard.
+  VPCId:
+    Description: The id of an existing VPC that the EC2 instances will be launched into.
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Default: VPCId
+    ConstraintDescription: must be an existing VPC.
+  PrivateSubnetId:
+    Description: The id of an existing private subnet that the EC2 instances will be launched into.
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Default: PrivateSubnetId
+    ConstraintDescription: must be an existing private subnet in the Virtual Private Cloud.
+  EFSVolumeId:
+    Description: The id of the EFS volume need to be attached
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Default: EFSVolumeId
+  MountPoint:
+    Description: The Linux mount point for the EFS volume
+    Type: String
+    Default: /mnt/efs
+  EFSMountTargateSecurityGroupId:
+    Description: The security group id of the ECS mount target
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Default: EFSMountTargateSecurityGroupId
+  AnalysisServerCleanupSNSTopic:
+    Description: The arn of the SNS topic to trigger the cleanup lambda function
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Default: AnalysisServerCleanupSNSTopic
+  RunDir:
+    Description: The s3 object location which will be passed to the ec2 instance.
+    Type: String
+    Default: ""
+
+Resources:
+  AnalysisServerEC2Role:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Path: "/"
+
+  AllowPublishToSNS:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: AnalysisServerEC2Policy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - sns:Publish
+            Resource: !Ref AnalysisServerCleanupSNSTopic
+          - Effect: Allow
+            Action:
+              - kms:Decrypt
+            Resource: "*"
+      Roles:
+        - !Ref AnalysisServerEC2Role
+
+  AnalysisServerEC2InstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: "/"
+      Roles:
+        - Ref: "AnalysisServerEC2Role"
+
+  AnalysisServerEC2Instance:
+    Type: AWS::EC2::Instance
+    DependsOn: AnalysisServerEC2InstanceProfile
+    Properties:
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref AnalysisServerEC2InstanceProfile
+      KeyName: !Ref KeyName
+      ImageId: !Ref InstanceAMI
+      SecurityGroupIds: [!Ref InstanceSecurityGroup]
+      SubnetId: !Ref PrivateSubnetId
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: !Ref AnalysisServerRootVolumeSize
+            VolumeType: !Ref AnalysisServerVolumeType
+        - DeviceName: /dev/sdf
+          Ebs:
+            VolumeSize: !Ref AnalysisServerSecondVolumeSize
+            VolumeType: !Ref AnalysisServerVolumeType
+      UserData:
+        Fn::Base64: !Sub |
+          #cloud-config
+          repo_update: true
+          repo_upgrade: all
+
+          packages:
+          - amazon-efs-utils
+
+          runcmd:
+          - mkdir -p ${MountPoint}
+          - echo "${EFSVolumeId}:/ ${MountPoint} efs tls,_netdev" >> /etc/fstab
+          - mount -a -t efs defaults
+          - rpm -Uvh https://s3.amazonaws.com/amazoncloudwatch-agent/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm
+          - /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c ssm:${SSMKey} -s
+          - echo "${RunDir}" > /etc/temp.txt
+
+      Tags:
+        - Key: Name
+          Value: ID Analysis Server
+
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for Analysis Server
+      VpcId: !Ref VPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: "2049"
+          ToPort: "2049"
+          SourceSecurityGroupId: !Ref EFSMountTargateSecurityGroupId
+
+  # AnalysisServerVolume:
+  #   Type: AWS::EC2::Volume
+  #   Properties:
+  #     Size: !Ref "AnalysisServerVolumeSize"
+  #     VolumeType: !Ref "AnalysisServerVolumeType"
+  #     AvailabilityZone: !GetAtt "AnalysisServerEC2Instance.AvailabilityZone"
+  #     Encrypted: true
+  #     KmsKeyId: !ImportValue AnalysisServerEBSCMKArn
+  # AnalysisServerVolumeAttachment:
+  #   Type: AWS::EC2::VolumeAttachment
+  #   Properties:
+  #     Device: /dev/xdf
+  #     InstanceId: !Ref "AnalysisServerEC2Instance"
+  #     VolumeId: !Ref "AnalysisServerVolume"
+
+Outputs:
+  InstanceId:
+    Description: InstanceId of the newly created EC2 instance
+    Value: !Ref "AnalysisServerEC2Instance"

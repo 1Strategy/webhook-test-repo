@@ -1,0 +1,515 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: CodePipeline to build the latest analysis server ami.
+####################################################
+# Parameters
+####################################################
+Parameters:
+  GitHubOwner:
+    Type: String
+    Default: jing-1strategy
+  GithubPersonalToken:
+    Type: String
+    NoEcho: true
+  GitHubBranchName:
+    Type: String
+    Default: master
+  GitHubRepoName:
+    Type: String
+    Default: packer-codebuild-demo
+  SharedServiceAccountId:
+    Type: String
+    Default: "355189840595"
+  TestAccountId:
+    Type: String
+    Default: "842337631775"
+  StageAccountId:
+    Type: String
+    Default: "281782457076"
+  ProdAccountId:
+    Type: String
+    Default: "466306626184"
+  SharedServiceAccountCMKAdminRoleName:
+    Type: String
+    Default: 1S-Admins
+  AnalysisServerPipelineArtifactsBucketName:
+    Type: String
+    Default: 1s-analysis-server-codepipeline-us-east-1
+  VPCId:
+    Type: String
+    Default: vpc-0aae24b90e0d93956
+  PrivateSubnetList:
+    Type: List<AWS::EC2::Subnet::Id>
+    Default: subnet-09b3edb90e1e847e4,subnet-0527c516155b9fefe,subnet-0316041a7d0bb41a4
+####################################################
+# Resources
+####################################################
+Resources:
+  ####################################################
+  ## Resources - KMS - CMK
+  ####################################################
+  AnalysisServerCMKKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: "Analysis server codepipeline CMK."
+      KeyPolicy:
+        Version: "2012-10-17"
+        Id: "key-default-1"
+        Statement:
+          - Sid: "Enable IAM User Permissions"
+            Effect: "Allow"
+            Principal:
+              AWS: !Sub "arn:aws:iam::${SharedServiceAccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: "Allow administration of the key"
+            Effect: "Allow"
+            Principal:
+              AWS: !Sub "arn:aws:iam::${SharedServiceAccountId}:role/${SharedServiceAccountCMKAdminRoleName}"
+            Action:
+              - "kms:Create*"
+              - "kms:Describe*"
+              - "kms:Enable*"
+              - "kms:List*"
+              - "kms:Put*"
+              - "kms:Update*"
+              - "kms:Revoke*"
+              - "kms:Disable*"
+              - "kms:Get*"
+              - "kms:Delete*"
+              - "kms:ScheduleKeyDeletion"
+              - "kms:CancelKeyDeletion"
+            Resource: "*"
+
+          - Sid: "Allow use of the key"
+            Effect: "Allow"
+            Principal: "*"
+            Action:
+              - "kms:DescribeKey"
+              - "kms:Encrypt"
+              - "kms:Decrypt"
+              - "kms:ReEncrypt*"
+              - "kms:GenerateDataKey"
+              - "kms:GenerateDataKeyWithoutPlaintext"
+            Resource: "*"
+          - Sid: Allow attachment of persistent resources
+            Effect: Allow
+            Principal: "*"
+            Action:
+              - kms:CreateGrant
+              - kms:ListGrants
+              - kms:RevokeGrant
+            Resource: "*"
+            Condition:
+              Bool:
+                kms:GrantIsForAWSResource: "true"
+
+  CMKAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/${GitHubRepoName}-CMK
+      TargetKeyId:
+        Ref: AnalysisServerCMKKey
+  #################################################################
+  ## Resources - S3 Bucket - AnalysisServerPipelineArtifactsBucket
+  #################################################################
+  CodePipelineS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref AnalysisServerPipelineArtifactsBucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref AnalysisServerCMKKey
+  ####################################################
+  ## Resources - S3 Bucket Policy
+  ####################################################
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CodePipelineS3Bucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyUnEncryptedObjectUploads
+            Effect: Deny
+            Principal: "*"
+            Action:
+              - s3:PutObject
+            Resource:
+              - !Sub arn:aws:s3:::${AnalysisServerPipelineArtifactsBucketName}/*
+            Condition:
+              StringNotEquals:
+                s3:x-amz-server-side-encryption: aws:kms
+          - Sid: DenyInsecureConnections
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !Sub arn:aws:s3:::${AnalysisServerPipelineArtifactsBucketName}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+  ####################################################
+  ## Resources - Github Webhook
+  ####################################################
+  AppPipelineWebhook:
+    Type: AWS::CodePipeline::Webhook
+    Properties:
+      Authentication: GITHUB_HMAC
+      AuthenticationConfiguration:
+        SecretToken: !Ref GithubPersonalToken
+      Filters:
+        - JsonPath: "$.ref"
+          MatchEquals: refs/heads/{Branch}
+      TargetPipeline: !Ref AnalysisServerPipeline
+      TargetAction: SourceAction
+      Name: AnalysisServerPipelineWebhook
+      TargetPipelineVersion: !GetAtt AnalysisServerPipeline.Version
+      RegisterWithThirdParty: true
+  ####################################################
+  ## Resources - IAM
+  ####################################################
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${GitHubRepoName}-CodeBuildRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2FullAccess
+      Path: /
+  CodeBuildPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub ${GitHubRepoName}-CodeBuildPolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - ec2:AttachVolume
+              - ec2:AuthorizeSecurityGroupIngress
+              - ec2:CopyImage
+              - ec2:CreateImage
+              - ec2:CreateKeypair
+              - ec2:CreateSecurityGroup
+              - ec2:CreateSnapshot
+              - ec2:CreateTags
+              - ec2:CreateVolume
+              - ec2:DeleteKeyPair
+              - ec2:DeleteSecurityGroup
+              - ec2:DeleteSnapshot
+              - ec2:DeleteVolume
+              - ec2:DeregisterImage
+              - ec2:DescribeImageAttribute
+              - ec2:DescribeImages
+              - ec2:DescribeInstances
+              - ec2:DescribeInstanceStatus
+              - ec2:DescribeRegions
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeSnapshots
+              - ec2:DescribeSubnets
+              - ec2:DescribeTags
+              - ec2:DescribeVolumes
+              - ec2:DetachVolume
+              - ec2:GetPasswordData
+              - ec2:ModifyImageAttribute
+              - ec2:ModifyInstanceAttribute
+              - ec2:ModifySnapshotAttribute
+              - ec2:RegisterImage
+              - ec2:RunInstances
+              - ec2:StopInstances
+              - ec2:TerminateInstances
+              - ec2:DescribeSecurityGroups
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - iam:PassRole
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:GetBucketAcl
+              - s3:GetBucketLocation
+            Resource:
+              - !Sub "arn:aws:s3:::${AnalysisServerPipelineArtifactsBucketName}/*"
+              - !Sub "arn:aws:s3:::${AnalysisServerPipelineArtifactsBucketName}"
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: arn:aws:logs:*:*:*
+          - Effect: Allow
+            Action:
+              - kms:Encrypt,
+              - kms:Decrypt,
+              - kms:ReEncrypt*,
+              - kms:GenerateDataKey*,
+              - kms:DescribeKey"
+            Resource: !GetAtt AnalysisServerCMKKey.Arn
+      Roles:
+        - !Ref CodeBuildRole
+  PipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${GitHubRepoName}-CodePipelineRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCodePipelineFullAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+      Path: /
+  PipelinePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub ${GitHubRepoName}-codepipeline-policy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - iam:ListRoles
+              - iam:PassRole
+              - cloudformation:*
+              - codebuild:BatchGetBuilds
+              - codebuild:StartBuild
+            Resource:
+              - "*"
+          - Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource:
+              - "*"
+      Roles:
+        - !Ref PipelineRole
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${GitHubRepoName}-Lambda-ShareAMI
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Path: /
+  LambdaExecutionPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub ${GitHubRepoName}-lambda-execution-policy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - ec2:DescribeImages
+              - ec2:ModifyImageAttribute
+            Resource:
+              - "*"
+          - Effect: Allow
+            Action:
+              - codepipeline:PutJobSuccessResult
+              - codepipeline:PutJobFailureResult
+            Resource:
+              - "*"
+      Roles:
+        - !Ref LambdaExecutionRole
+  ####################################################
+  ## Resources - Security Group
+  ####################################################
+  CodeBuildSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Used by CodeBuild to access packer instance.
+      VpcId: !Ref VPCId
+  PackerEC2InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow all access from codebuild security group
+      VpcId: !Ref VPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: "0"
+          ToPort: "65535"
+          SourceSecurityGroupId: !Ref "CodeBuildSecurityGroup"
+  ####################################################
+  ## Resources - CodeBuild
+  ####################################################
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${GitHubRepoName}-CodeBuildProject
+      Description: Build the analysis server AMI using Packer.
+      EncryptionKey: !Ref AnalysisServerCMKKey
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:2.0
+      TimeoutInMinutes: 10
+      Source:
+        Type: CODEPIPELINE
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref CodeBuildSecurityGroup
+        Subnets: !Ref PrivateSubnetList
+        VpcId: !Ref VPCId
+  #####################################################################
+  ## Resources - Lambda Function - Share AMI with Application Accounts
+  #####################################################################
+  ShareAMIFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.7
+      FunctionName: share-ami
+      Timeout: 300
+      MemorySize: 128
+      Code:
+        ZipFile: !Sub |
+          import json
+          import boto3
+          from operator import itemgetter
+
+          def lambda_handler(event, context):
+              print(event)
+              
+              job_id = event['CodePipeline.job']['id']
+              ec2_client = boto3.client('ec2')
+              ec2_resource = boto3.resource('ec2')
+              code_pipeline_client = boto3.client('codepipeline')
+              try:   
+                latest_ami_id = sorted(ec2_client.describe_images(
+                    Filters=[
+                        {
+                            'Name': 'tag:Name',
+                            'Values': [
+                                    'AnalysisServer-*',
+                            ]
+                        }
+                    ],
+                )['Images'], key=itemgetter('CreationDate'))[-1]['ImageId']
+                
+                latest_image = ec2_resource.Image(latest_ami_id)
+                latest_image.modify_attribute(
+                    LaunchPermission={
+                        'Add': [
+                            {
+                                'UserId': '${TestAccountId}'
+                            },
+                            {
+                                'UserId': '${StageAccountId}'
+                            },
+                            {
+                                'UserId': '${ProdAccountId}'
+                            }
+                        ],
+                
+                    }
+                )
+                code_pipeline_client.put_job_success_result(jobId=job_id)
+              except Exception as e:
+                print('Function failed due to exception.')
+                print(e)
+                code_pipeline_client.put_job_failure_result(jobId=job_id, failureDetails={
+                                                'message': 'Function exception: ' + str(e), 'type': 'JobFailed'})
+  ####################################################
+  ## Resources - CodePipeline
+  ####################################################
+  AnalysisServerPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    DependsOn: CodePipelineS3Bucket
+    Properties:
+      ArtifactStore:
+        Type: S3
+        EncryptionKey:
+          Id: !Ref AnalysisServerCMKKey
+          Type: KMS
+        Location: !Ref AnalysisServerPipelineArtifactsBucketName
+      RoleArn: !GetAtt PipelineRole.Arn
+      Name: !Sub ${GitHubRepoName}-CodePipeline
+      Stages:
+        - Name: GithubSource
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: 1
+                Provider: GitHub
+              OutputArtifacts:
+                - Name: SourceOutput
+              Configuration:
+                Owner: !Ref GitHubOwner
+                Repo: !Ref GitHubRepoName
+                Branch: !Ref GitHubBranchName
+                OAuthToken: !Ref GithubPersonalToken
+                PollForSourceChanges: false
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+              RunOrder: 1
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: BuildOutput
+        - Name: Invoke
+          Actions:
+            - Name: call-shareami-function
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Version: 1
+                Provider: Lambda
+              Configuration:
+                FunctionName: !Ref ShareAMIFunction
+              RunOrder: 1
+####################################################
+## Outputs
+####################################################
+Outputs:
+  AnalysisServerCMKKeyArn:
+    Description: The arn of the Analysis Server CodePipeline CMK.
+    Value: !GetAtt AnalysisServerCMKKey.Arn
+    Export:
+      Name: AnalysisServerCMKKeyArn
+
+  PackerEC2InstanceSecurityGroup:
+    Description: The security group which will be used by packer temp EC2 instances.
+    Value: !Ref PackerEC2InstanceSecurityGroup
+    Export:
+      Name: PackerEC2InstanceSecurityGroup

@@ -1,0 +1,26 @@
+name: JING_WebPortal_Step2_Step3
+description: Webportal Clouformation templates need to deployed to the test, stage and prod env.
+owner: jing@1strategy.com
+products:
+  - name: review-portal-asg-step2
+    template: product-review-portal-asg-step2.yaml
+    owner: jing@1strategy.com
+    description: Create an load balanced and auto scaled Review Portal web site with CloudWatch agent installed.
+  - name: webportal-codedeploy-step3
+    template: product-webportal-codedeploy-step3.yaml
+    owner: jing@1strategy.com
+    description: Create the CodeDeploy application, deployment group, and service role used by CodeDeploy.
+accounts:
+  - identifier: shared service account
+    number: 355189840595
+  - identifier: test account
+    number: 281782457076
+  - identifier: stage account
+    number: 842337631775
+  # - identifier: prod account
+  #   number: 123456789012
+tags:
+  - Key: Name
+    Value: WebPortal
+principals:
+  - role/1S-Admins

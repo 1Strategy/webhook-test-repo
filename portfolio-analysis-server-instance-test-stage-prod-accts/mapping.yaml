@@ -1,0 +1,22 @@
+name: JING_Analysis_Server
+description: Analysis Server Clouformation templates need to deployed to the test, stage and prod env.
+owner: jing@1strategy.com
+products:
+  - name: product-analysis-server
+    template: product-analysis-server.yaml
+    owner: jing@1strategy.com
+    description: Template to create EC2 instance for Review Portal with CloudWatch agent installed.
+accounts:
+  - identifier: shared service account
+    number: 355189840595
+  - identifier: test account
+    number: 281782457076
+  - identifier: stage account
+    number: 842337631775
+  # - identifier: prod account
+  #   number: 123456789012
+tags:
+  - Key: Name
+    Value: AnalysisServer
+principals:
+  - role/1S-Admins

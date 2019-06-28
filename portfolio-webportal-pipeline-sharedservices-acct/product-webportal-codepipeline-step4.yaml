@@ -1,0 +1,248 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: CodePipeline to deploy the latest Webportal code from Github to test, stage and prod environment.
+Metadata:
+  "AWS::CloudFormation::Interface":
+    ParameterGroups:
+      - Label:
+          default: "Github Settings:"
+        Parameters:
+          - GitHubOwner
+          - GithubPersonalToken
+          - GitHubRepoName
+          - GitHubBranchName
+####################################################
+# Parameters
+####################################################
+Parameters:
+  GitHubOwner:
+    Type: String
+    Default: jing-1strategy
+  GithubPersonalToken:
+    Type: String
+    NoEcho: true
+  GitHubBranchName:
+    Type: String
+    Default: master
+  GitHubRepoName:
+    Type: String
+    Default: codepipeline-demo
+####################################################
+# Resources
+####################################################
+Resources:
+  ####################################################
+  ## Resources - Github Webhook
+  ####################################################
+  AppPipelineWebhook:
+    Type: AWS::CodePipeline::Webhook
+    Properties:
+      Authentication: GITHUB_HMAC
+      AuthenticationConfiguration:
+        SecretToken: !Ref GithubPersonalToken
+      Filters:
+        - JsonPath: "$.ref"
+          MatchEquals: refs/heads/{Branch}
+      TargetPipeline: !Ref WebPortalPipeline
+      TargetAction: SourceAction
+      Name: WebPortalPipelineWebhook
+      TargetPipelineVersion: !GetAtt WebPortalPipeline.Version
+      RegisterWithThirdParty: true
+
+  ####################################################
+  ## Resources - IAM
+  ####################################################
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${GitHubRepoName}-CodeBuildRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+  CodeBuildPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub ${GitHubRepoName}-CodeBuildPolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetBucketPolicy
+              - s3:GetObject
+              - s3:ListBucket
+            Resource:
+              - !Join [
+                  "",
+                  [
+                    "arn:aws:s3:::",
+                    !ImportValue PipelineArtifactsBucketName,
+                    "/*",
+                  ],
+                ]
+              - !Join [
+                  "",
+                  ["arn:aws:s3:::", !ImportValue PipelineArtifactsBucketName],
+                ]
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: arn:aws:logs:*:*:*
+          - Effect: Allow
+            Action:
+              - kms:Encrypt,
+              - kms:Decrypt,
+              - kms:ReEncrypt*,
+              - kms:GenerateDataKey*,
+              - kms:DescribeKey"
+            Resource: !ImportValue CMKKeyArn
+
+      Roles:
+        - !Ref CodeBuildRole
+
+  PipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${GitHubRepoName}-CodePipelineRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCodePipelineFullAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/AWSCodeDeployFullAccess
+      Path: /
+  PipelinePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub ${GitHubRepoName}-codepipeline-policy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - iam:ListRoles
+              - iam:PassRole
+              - cloudformation:*
+              - codebuild:BatchGetBuilds
+              - codebuild:StartBuild
+            Resource:
+              - "*"
+          - Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Resource:
+              - !Join [
+                "",
+                ["arn:aws:iam::", !ImportValue TestAccountId,":role/CrossAccountCodeDeployServiceRole",],
+              ]
+              - !Join [
+                "",
+                ["arn:aws:iam::", !ImportValue StageAccountId,":role/CrossAccountCodeDeployServiceRole",],
+              ]
+              # - !Join [
+              #   "",
+              #   ["arn:aws:iam::", !ImportValue ProdAccountId,":role/CrossAccountCodeDeployServiceRole",],
+              # ]
+              
+      Roles:
+        - !Ref PipelineRole
+
+  ####################################################
+  ## Resources - CodeBuild
+  ####################################################
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${GitHubRepoName}-CodeBuildProject
+      Description: Build the web portal code.
+      EncryptionKey: !ImportValue CMKKeyArn
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:2.0
+      TimeoutInMinutes: 10
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              runtime-versions:
+                nodejs: 10
+              commands:
+                - echo Install something here...
+            build:
+              commands:
+                - echo Building the web protal project...
+          artifacts:
+            files:
+              - '**/*'
+
+  ####################################################
+  ## Resources - CodePipeline
+  ####################################################
+  WebPortalPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      ArtifactStore:
+        Type: S3
+        EncryptionKey: 
+          Id: !ImportValue CMKKeyArn
+          Type: KMS
+        Location: !ImportValue PipelineArtifactsBucketName
+      RoleArn: !GetAtt PipelineRole.Arn
+      Name: !Sub ${GitHubRepoName}-CodePipeline
+      Stages:
+        - Name: GithubSource
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: 1
+                Provider: GitHub
+              OutputArtifacts:
+                - Name: SourceOutput
+              Configuration:
+                Owner: !Ref GitHubOwner
+                Repo: !Ref GitHubRepoName
+                Branch: !Ref GitHubBranchName
+                OAuthToken: !Ref GithubPersonalToken
+                PollForSourceChanges: false
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+              RunOrder: 1
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: BuildOutput
+# Outputs:

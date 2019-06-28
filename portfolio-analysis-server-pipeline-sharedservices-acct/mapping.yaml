@@ -1,0 +1,18 @@
+name: JING_Analysis_Server_Pipeline
+description: Analysis Server PipelineClouformation templates need to deployed to the Shared Service Account.
+owner: jing@1strategy.com
+products:
+  - name: analysis-server-codepipeline
+    template: product-analysis-server-codepipeline.yaml
+    owner: jing@1strategy.com
+    description: Creates the Analysis Server CodePipeline to build the AMI.
+accounts:
+  - identifier: shared service account
+    number: 355189840595
+
+tags:
+  - Key: Name
+    Value: AnalysisServer
+principals:
+  - role/1S-Admins
+  - user/jingliang

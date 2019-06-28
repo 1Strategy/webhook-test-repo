@@ -1,0 +1,712 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Template to create an load balanced and auto scaled Review Portal web site with CloudWatch agent installed."
+Metadata:
+  "AWS::CloudFormation::Interface":
+    ParameterGroups:
+      - Label:
+          default: Web server ec2 instance settings
+        Parameters:
+          - WebServerInstanceType
+          - InstanceAMI
+          - SSMKey
+          - KeyName
+          - WebServerVolumeType
+          - WebServerVolumeSize
+          - VPCId
+          - VPCCidrBlock
+          - PrivateSubnetList
+          - PublicSubnetList
+      - Label:
+          default: Auto scaling group settings
+        Parameters:
+          - ASGMinSize
+          - ASGMaxSize
+          - ASGDesiredSize
+      - Label:
+          default: External ALB settings
+        Parameters:
+          - ALBAccessLogsS3Bucket
+          - CertificateArn
+          - ExternalHostedZoneName
+          - ExternalRecordSetName
+      - Label:
+          default: Internal ALB settings
+        Parameters:
+          - PrivateDNSHostedZoneName
+####################################################
+# Parameters
+####################################################
+Parameters:
+  SSMKey:
+    Description: Name of parameter store which contains the json configuration of CWAgent.
+    Type: String
+    Default: AmazonCloudWatch-Review-Portal-CW-Config
+
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Type: "AWS::SSM::Parameter::Value<AWS::EC2::KeyPair::KeyName>"
+    Default: EC2KeyPairName
+
+  WebServerInstanceType:
+    Description: EC2 instance type of the web server
+    Type: String
+    Default: t3.small
+    AllowedValues:
+      [
+        t2.nano,
+        t2.micro,
+        t2.small,
+        t2.medium,
+        t2.large,
+        t2.xlarge,
+        t2.2xlarge,
+        t3.nano,
+        t3.micro,
+        t3.small,
+        t3.medium,
+        t3.large,
+        t3.xlarge,
+        t3.2xlarge,
+        m4.large,
+        m4.xlarge,
+        m4.2xlarge,
+        m4.4xlarge,
+        m4.10xlarge,
+        m5.large,
+        m5.xlarge,
+        m5.2xlarge,
+        m5.4xlarge,
+        c5.large,
+        c5.xlarge,
+        c5.2xlarge,
+        c5.4xlarge,
+        c5.9xlarge,
+        g3.8xlarge,
+        r5.large,
+        r5.xlarge,
+        r5.2xlarge,
+        r5.4xlarge,
+        r3.12xlarge,
+        i3.xlarge,
+        i3.2xlarge,
+        i3.4xlarge,
+        i3.8xlarge,
+        d2.xlarge,
+        d2.2xlarge,
+        d2.4xlarge,
+        d2.8xlarge,
+      ]
+    ConstraintDescription: must be a valid EC2 instance type.
+
+  InstanceAMI:
+    Description: Managed AMI ID for EC2 Instance
+    Type: "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>"
+    Default: "/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2"
+
+  WebServerVolumeType:
+    Description: The type of the volume.
+    Type: String
+    Default: gp2
+    AllowedValues: [gp2, io1]
+    ConstraintDescription: This can be gp2 for General Purpose SSD, io1 for Provisioned IOPS SSD, st1 for Throughput Optimized HDD, sc1 for Cold HDD, or standard for Magnetic volumes.
+
+  WebServerVolumeSize:
+    Description: The size of the volume, in GiBs.
+    Type: String
+    Default: 50
+    ConstraintDescription: 1-16,384 for gp2, 4-16,384 for io1, 500-16,384 for st1, 500-16,384 for sc1, and 1-1,024 for standard.
+
+  VPCId:
+    Description: The id of an existing VPC that the EC2 instances will be launched into.
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Default: VPCId
+    ConstraintDescription: must be an existing VPC.
+
+  VPCCidrBlock:
+    Description: The IPv4 CIDR block of the VPC that the EC2 instances will be launched into.
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Default: VPCCidrBlock
+    ConstraintDescription: must be an valid IPv4 CIDR block.
+
+  PrivateSubnetList:
+    Description: The list of existing private subnet IDs in the VPC that the Web Server instances will be launched into.
+    Type: "AWS::SSM::Parameter::Value<List<String>>"
+    Default: PrivateSubnetList
+    ConstraintDescription: must be a list of existing private subnets in the Virtual Private Cloud.
+
+  PublicSubnetList:
+    Description: The list of existing public subnet IDs in the VPC.
+    Type: "AWS::SSM::Parameter::Value<List<String>>"
+    Default: PublicSubnetList
+    ConstraintDescription: must specify public subnets from at least two Availability Zones.
+
+  ASGMinSize:
+    Description: Minimum number of servers in the Auto-Scaling Group.
+    Type: String
+    Default: 1
+    ConstraintDescription: must greater or equal to '1'
+
+  ASGMaxSize:
+    Description: Maximum number of servers in the Auto-Scaling Group.
+    Type: String
+    Default: 5
+    ConstraintDescription: must greater or equal to ASGMinSize.
+
+  ASGDesiredSize:
+    Description: Desired number of servers in the Auto-Scaling Group.
+    Type: String
+    Default: 1
+    ConstraintDescription: must greater or equal to ASGMinSize and less than or equal to ASGMaxSize.
+
+  ALBAccessLogsS3Bucket:
+    Description: The name of the S3 bucket for the ALB access logs.
+    Type: String
+    Default: 1s-jingtest
+    ConstraintDescription: The bucket must exist in the same region as the load balancer and have a bucket policy that grants Elastic Load Balancing permissions to write to the bucket.
+
+  CertificateArn:
+    Description: Specifies an SSL server certificate for use with your application load balancer.
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Default: CertificateArn
+    ConstraintDescription: must be an existing certificate arn in ACM.
+
+  ExternalHostedZoneName:
+    Description: The name of the public domain for the hosted zone where you want to add the resource record set.
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Default: ExternalHostedZoneName
+    ConstraintDescription: must be an existing public domain name in Route53.
+
+  ExternalRecordSetName:
+    Description: The name of the record set with will be added to external hosted zone.
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Default: ExternalRecordSetName
+    ConstraintDescription: must be an existing public domain name in Route53.
+
+  PrivateDNSHostedZoneName:
+    Description: The name of the private hosted zone.
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Default: PrivateDNSHostedZoneName
+    ConstraintDescription: must match the internal alb certificate.
+
+  CMKArn:
+    Description: ARN of the KMS CMK will be used to encrypt codepipeline artifacts bucket.
+    Type: String
+
+  PipelineArtifactsBucketName:
+    Description: Name of the Pipeline Artifacts Bucket.
+    Type: String
+    Default: 1s-webportal-codepipeline-us-east-1
+####################################################
+# Resources
+####################################################
+Resources:
+  ####################################################
+  ## Resources - IAM
+  ####################################################
+  WebServerEC2Role:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+      Path: "/"
+
+  WebServerEC2Policy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: WebServerEC2Policy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: "*"
+            Resource: !Ref CMKArn
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:ListBucket
+            Resource:
+              - !Join [
+                  "",
+                  ["arn:aws:s3:::", !Ref PipelineArtifactsBucketName, "/*"],
+                ]
+              - !Join ["", ["arn:aws:s3:::", !Ref PipelineArtifactsBucketName]]
+      Roles:
+        - !Ref WebServerEC2Role
+
+  WebServerEC2InstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: "/"
+      Roles:
+        - Ref: "WebServerEC2Role"
+
+  ####################################################
+  ## Resources - Security Groups
+  ####################################################
+  ExternalALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTPS access via port 80 and 443
+      VpcId: !Ref VPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: "80"
+          ToPort: "80"
+          CidrIp: "0.0.0.0/0"
+        - IpProtocol: tcp
+          FromPort: "443"
+          ToPort: "443"
+          CidrIp: "0.0.0.0/0"
+
+  InternalALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable port 443
+      VpcId: !Ref VPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: "443"
+          ToPort: "443"
+          CidrIp: !Ref VPCCidrBlock
+
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTPS access via port 443
+      VpcId: !Ref VPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: "0"
+          ToPort: "65535"
+          SourceSecurityGroupId: !Ref "ExternalALBSecurityGroup"
+        - IpProtocol: tcp
+          FromPort: "0"
+          ToPort: "65535"
+          SourceSecurityGroupId: !Ref "InternalALBSecurityGroup"
+
+  ####################################################
+  ## Resources - ASG Launch Configuration
+  ####################################################
+  WebServerLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    DependsOn: WebServerEC2InstanceProfile
+    Properties:
+      InstanceType: !Ref "WebServerInstanceType"
+      IamInstanceProfile: !Ref "WebServerEC2InstanceProfile"
+      KeyName: !Ref "KeyName"
+      ImageId: !Ref "InstanceAMI"
+      SecurityGroups:
+        - !Ref WebServerSecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: "/dev/sda1"
+          Ebs:
+            VolumeSize: !Ref "WebServerVolumeSize"
+            VolumeType: !Ref "WebServerVolumeType"
+            Encrypted: "true"
+            DeleteOnTermination: "true"
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # Install CodeDeploy Agent
+          yum -y install ruby
+          cd /home/ec2-user
+          wget https://aws-codedeploy-${AWS::Region}.s3.${AWS::Region}.amazonaws.com/latest/install
+          chmod +x ./install
+          ./install auto
+
+          # Install CloudWatch Agent
+          rpm -Uvh https://s3.amazonaws.com/amazoncloudwatch-agent/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm
+          /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c ssm:${SSMKey} -s
+
+          # Install Nodejs
+          echo "Manually set HOME to /root"
+          export HOME="/root"
+          echo $HOME
+          curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.34.0/install.sh | bash
+          . ~/.nvm/nvm.sh
+
+          nvm install 10.16.0
+          node -e "console.log('Running Node.js ' + process.version)"
+
+          #Required
+          domain=$(uname -n)
+          echo "Generating SSL for $domain"
+          commonname=$domain
+          country=US
+          state=CA
+          locality=SF
+          organization=IDbyDNA
+          organizationalunit=DEV
+          email=abc@idbydna.com
+
+          #Optional
+          password=dummypassword
+
+
+          echo "Generating key request for $domain"
+
+          mkdir -p /etc/ssl/private
+          chmod 700 /etc/ssl/private
+          cd /etc/ssl/private
+
+          #Generate a key
+          openssl genrsa -des3 -passout pass:$password -out $domain.key 2048 -noout
+
+          #Remove passphrase from the key. Comment the line out to keep the passphrase
+          echo "Removing passphrase from key"
+          openssl rsa -in $domain.key -passin pass:$password -out $domain.key
+
+          #Create the request
+          echo "Creating CSR"
+          openssl req -new -key $domain.key -out $domain.csr -passin pass:$password -subj "/C=$country/ST=$state/L=$locality/O=$organization/OU=$organizationalunit/CN=$commonname/emailAddress=$email"
+
+          #Generate a cert
+          mkdir -p /etc/ssl/certs
+          openssl x509 -req -days 365 -in $domain.csr -signkey $domain.key -out /etc/ssl/certs/$domain.crt
+
+          # Install Nginx
+          amazon-linux-extras install nginx1.12
+
+          # Configure HTTPS on Nginx
+          cat <<EOF > /etc/nginx/conf.d/ssl.conf
+          server {
+              listen 443 ssl;
+              listen [::]:443 ssl;
+
+              server_name $domain;
+
+              ssl_certificate /etc/ssl/certs/$domain.crt;
+              ssl_certificate_key /etc/ssl/private/$domain.key;
+
+
+              ########################################################################
+              # from https://cipherli.st/                                            #
+              # and https://raymii.org/s/tutorials/Strong_SSL_Security_On_nginx.html #
+              ########################################################################
+
+              ssl_protocols TLSv1 TLSv1.1 TLSv1.2;
+              ssl_prefer_server_ciphers on;
+              ssl_ciphers "EECDH+AESGCM:EDH+AESGCM:AES256+EECDH:AES256+EDH";
+              ssl_ecdh_curve secp384r1;
+              ssl_session_cache shared:SSL:10m;
+              ssl_session_tickets off;
+              ssl_stapling on;
+              ssl_stapling_verify on;
+              resolver 8.8.8.8 8.8.4.4 valid=300s;
+              resolver_timeout 5s;
+              # Disable preloading HSTS for now.  You can use the commented out header line that includes
+              # the "preload" directive if you understand the implications.
+              #add_header Strict-Transport-Security "max-age=63072000; includeSubdomains; preload";
+              add_header Strict-Transport-Security "max-age=63072000; includeSubdomains";
+              add_header X-Frame-Options DENY;
+              add_header X-Content-Type-Options nosniff;
+
+              ##################################
+              # END https://cipherli.st/ BLOCK #
+              ##################################
+              location / {
+                  # placeholder
+                  # placeholder
+              }
+          }
+          EOF
+
+          # Start Nginx
+          systemctl start nginx
+          systemctl status nginx
+          systemctl enable nginx
+  ####################################################
+  ## Resources - Auto Scaling Group
+  ####################################################
+  WebServerASGroup:
+    Type: "AWS::AutoScaling::AutoScalingGroup"
+    DependsOn:
+      - ExternalTargetGroup
+      - InternalTargetGroup
+    Properties:
+      AutoScalingGroupName: "WebServerASGroup"
+      Cooldown: 300
+      DesiredCapacity: !Ref ASGDesiredSize
+      HealthCheckGracePeriod: 120
+      HealthCheckType: ELB
+      LaunchConfigurationName: !Ref "WebServerLaunchConfig"
+      MaxSize: !Ref ASGMaxSize
+      MetricsCollection:
+        - Granularity: 1Minute
+          Metrics:
+            - GroupMinSize
+            - GroupMaxSize
+      MinSize: !Ref ASGMinSize
+      TargetGroupARNs:
+        - Ref: "ExternalTargetGroup"
+        - Ref: "InternalTargetGroup"
+      TerminationPolicies:
+        - "OldestInstance"
+      Tags:
+        - Key: Name
+          Value: WebServerServer
+          PropagateAtLaunch: "true"
+      # If you want to connect to the instance for testing/debugging, put it into 'PublicSubnetList'
+      VPCZoneIdentifier: !Ref "PrivateSubnetList"
+  ###########################################################
+  ## Resources - Auto Scaling Group Scale Up Policy and Alarm
+  ###########################################################
+  WebServerScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      PolicyType: SimpleScaling
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref WebServerASGroup
+      Cooldown: 300
+      ScalingAdjustment: 1
+
+  CPUAlarmHigh:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Statistic: Average
+      Threshold: "75"
+      AlarmDescription: Scale-up Web Portal Server if CPU > 75% for 10 minutes
+      Period: "120"
+      EvaluationPeriods: "5"
+      AlarmActions:
+        - Ref: WebServerScaleUpPolicy
+      Namespace: AWS/EC2
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value:
+            Ref: WebServerASGroup
+      ComparisonOperator: GreaterThanThreshold
+      MetricName: CPUUtilization
+  ###########################################################
+  ## Resources - Auto Scaling Group Scale Down Policy and Alarm
+  ###########################################################
+  WebServerScaleDownPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      PolicyType: SimpleScaling
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref WebServerASGroup
+      Cooldown: 300
+      ScalingAdjustment: -1
+
+  CPUAlarmLow:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Statistic: Average
+      Threshold: "15"
+      AlarmDescription: Scale-down if CPU < 15% for 10 minutes
+      Period: "120"
+      EvaluationPeriods: "5"
+      AlarmActions:
+        - Ref: WebServerScaleDownPolicy
+      Namespace: AWS/EC2
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value:
+            Ref: WebServerASGroup
+      ComparisonOperator: LessThanThreshold
+      MetricName: CPUUtilization
+
+  ####################################################
+  ## Resources - External Application Load Balancer
+  ####################################################
+  WebServerExternalALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      LoadBalancerAttributes:
+        - Key: access_logs.s3.enabled
+          Value: "true"
+        - Key: access_logs.s3.bucket
+          Value: !Ref "ALBAccessLogsS3Bucket"
+        - Key: idle_timeout.timeout_seconds
+          Value: 60
+
+      Name: "WebServerExternalALB"
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref ExternalALBSecurityGroup
+      Subnets: !Ref PublicSubnetList
+      Type: "application"
+      Tags:
+        - Key: Name
+          Value: WebServerExternalALB
+  ##############################################################
+  ## Resources - External Application Load Balancer - Listeners
+  ##############################################################
+  HTTPListener:
+    Type: "AWS::ElasticLoadBalancingV2::Listener"
+    Properties:
+      DefaultActions:
+        - Type: "redirect"
+          RedirectConfig:
+            Protocol: "HTTPS"
+            Port: "443"
+            Host: "#{host}"
+            Path: "/#{path}"
+            Query: "#{query}"
+            StatusCode: "HTTP_301"
+      LoadBalancerArn: !Ref WebServerExternalALB
+      Port: 80
+      Protocol: "HTTP"
+
+  HttpsListener:
+    Type: "AWS::ElasticLoadBalancingV2::Listener"
+    Properties:
+      Certificates:
+        - CertificateArn: !Ref "CertificateArn"
+      DefaultActions:
+        - TargetGroupArn: !Ref "ExternalTargetGroup"
+          Type: forward
+      LoadBalancerArn: !Ref "WebServerExternalALB"
+      Port: 443
+      Protocol: HTTPS
+
+  #################################################################
+  ## Resources - External Application Load Balancer - Target Groups
+  #################################################################
+  ExternalTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckEnabled: "true"
+      HealthCheckIntervalSeconds: 15
+      HealthCheckPath: "/"
+      HealthCheckPort: 443
+      HealthCheckProtocol: HTTPS
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      Matcher:
+        HttpCode: "200-299"
+      Name: "ExternalTargetGroup"
+      Port: 443
+      Protocol: HTTPS
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref "VPCId"
+
+  ####################################################
+  ## Resources - Internal Application Load Balancer
+  ####################################################
+  WebServerInternalALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      LoadBalancerAttributes:
+        - Key: access_logs.s3.enabled
+          Value: "true"
+        - Key: access_logs.s3.bucket
+          Value: !Ref "ALBAccessLogsS3Bucket"
+        - Key: idle_timeout.timeout_seconds
+          Value: 60
+
+      Name: "WebServerInternalALB"
+      Scheme: internal
+      SecurityGroups:
+        - !Ref InternalALBSecurityGroup
+      Subnets: !Ref PrivateSubnetList
+      Type: "application"
+      Tags:
+        - Key: Name
+          Value: WebServerInternalALB
+  ##############################################################
+  ## Resources - Internal Application Load Balancer - Listeners
+  ##############################################################
+  InternalHttpsListener:
+    Type: "AWS::ElasticLoadBalancingV2::Listener"
+    Properties:
+      Certificates:
+        - CertificateArn: !Ref "CertificateArn"
+      DefaultActions:
+        - TargetGroupArn: !Ref "InternalTargetGroup"
+          Type: forward
+      LoadBalancerArn: !Ref "WebServerInternalALB"
+      Port: 443
+      Protocol: HTTPS
+
+  #################################################################
+  ## Resources - Internal Application Load Balancer - Target Groups
+  #################################################################
+  InternalTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckEnabled: "true"
+      HealthCheckIntervalSeconds: 15
+      HealthCheckPath: "/"
+      HealthCheckPort: 443
+      HealthCheckProtocol: HTTPS
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      Matcher:
+        HttpCode: "200-299"
+      Name: "InternalTargetGroup"
+      Port: 443
+      Protocol: HTTPS
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref "VPCId"
+
+  #################################################################
+  ## Resources - External DNS - RecordSet
+  #################################################################
+  ExternalDNSRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneName: !Ref "ExternalHostedZoneName"
+      Comment: DNS alias targeted to the external alb.
+      RecordSets:
+        - Name:
+            !Join [
+              "",
+              [!Ref "ExternalRecordSetName", ., !Ref "ExternalHostedZoneName"],
+            ]
+          Type: A
+          AliasTarget:
+            HostedZoneId: !GetAtt "WebServerExternalALB.CanonicalHostedZoneID"
+            DNSName: !GetAtt "WebServerExternalALB.DNSName"
+  #################################################################
+  ## Resources - Private DNS - Hosted Zone
+  #################################################################
+  PrivateDNSHostedZone:
+    Type: "AWS::Route53::HostedZone"
+    Properties:
+      HostedZoneConfig:
+        Comment: "Private hosted zone for web portal servers."
+      Name: !Ref "PrivateDNSHostedZoneName"
+      VPCs:
+        - VPCId: !Ref VPCId
+          VPCRegion: !Ref "AWS::Region"
+  #################################################################
+  ## Resources - Private DNS - RecordSet
+  #################################################################
+  PrivateDNSRecord:
+    Type: AWS::Route53::RecordSetGroup
+    DependsOn: PrivateDNSHostedZone
+    Properties:
+      HostedZoneName: !Ref "PrivateDNSHostedZoneName"
+      Comment: DNS alias targeted to the internal alb.
+      RecordSets:
+        - Name: !Ref "PrivateDNSHostedZoneName"
+          Type: A
+          AliasTarget:
+            HostedZoneId: !GetAtt "WebServerInternalALB.CanonicalHostedZoneID"
+            DNSName: !GetAtt "WebServerInternalALB.DNSName"
+
+Outputs:
+  ASGName:
+    Description: The name of the web portal auto-scaling group.
+    Value: !Ref WebServerASGroup
+    Export:
+      Name: WebPortal-ASGName
+  PipelineArtifactsBucketName:
+    Description: The name of the code pipeline artifacts bucket.
+    Value: !Ref PipelineArtifactsBucketName
+    Export:
+      Name: PipelineArtifactsBucketName

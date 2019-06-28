@@ -1,0 +1,22 @@
+name: JING_WebPortal_Step1_Step4
+description: Webportal Clouformation templates need to deployed to the Shared Service Account.
+owner: jing@1strategy.com
+products:
+  - name: webportal-prerequisites-step1
+    template: product-webportal-prerequisites-step1.yaml
+    owner: jing@1strategy.com
+    description: Creates a S3 bucket, KMS key, KMS alias that can be used by the WebPortal CodePipeline.
+  - name: webportal-codepipeline-step4
+    template: product-webportal-codepipeline-step4.yaml
+    owner: jing@1strategy.com
+    description: CodePipeline to deploy the latest Webportal code from Github to test, stage and prod environment.
+accounts:
+  - identifier: shared service account
+    number: 355189840595
+
+tags:
+  - Key: Name
+    Value: WebPortal
+principals:
+  - role/1S-Admins
+  - user/jingliang
